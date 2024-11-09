@@ -505,8 +505,8 @@ Analysis of results:
   * 24 cores ( AMD EPYC 7R13 @2650MHz)
   * 153.6 GB/s
 * Batching:
-  * Seems when scan ratio is high, another config is used -> e.g., 0.05  is faster than 0.02 -> so something must be batched, turning the problem into compute bound
-    * there's a drop from memory throughput ~120 GB -> 600~1300GB/s
+  * Seems when scan ratio is high, another config is used -> e.g., using higher scan ratio 0.05  is faster than 0.02 -> so something must be batched, turning the problem into compute bound
+    * there's a sudden leap of memory throughput ~ 120 GB -> 600 ~ 1300GB/s
     * e.g., see thread batch size of 10000
   * So we only target the case without data reuse
 * Memory and storage:
