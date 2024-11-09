@@ -311,14 +311,212 @@ def score_ah(
   ):
 ```
 
-SIMD LUT implementation: https://github.com/google-research/google-research/blob/8df36a6121df3a4f8243cbf42c53f300e10dad90/scann/scann/hashes/internal/lut16_avx2.inc
+* SIMD LUT implementation: https://github.com/google-research/google-research/blob/8df36a6121df3a4f8243cbf42c53f300e10dad90/scann/scann/hashes/internal/lut16_avx2.inc
+
+* Batched searching implementation: https://github.com/google-research/google-research/blob/8df36a6121df3a4f8243cbf42c53f300e10dad90/scann/scann/scann_ops/cc/scann.cc#L445-L468
+
+  * It seems this stuff is simply assign the search to multiple threads, thus no explicit data reuse (each thread still need to run over the search process itself)
+
+```
+Status ScannInterface::SearchBatchedParallel(const DenseDataset<float>& queries,
+                                             MutableSpan<NNResultsVector> res,
+                                             int final_nn, int pre_reorder_nn,
+                                             int leaves, int batch_size) const {
+  SCANN_RET_CHECK_EQ(queries.dimensionality(), dimensionality_);
+  const size_t numQueries = queries.size();
+  const size_t numCPUs = parallel_query_pool_->NumThreads();
+
+  const size_t kBatchSize =
+      std::min(std::max(min_batch_size_, DivRoundUp(numQueries, numCPUs)),
+               static_cast<size_t>(batch_size));
+  return ParallelForWithStatus<1>(
+      Seq(DivRoundUp(numQueries, kBatchSize)), parallel_query_pool_.get(),
+      [&](size_t i) {
+        size_t begin = kBatchSize * i;
+        size_t curSize = std::min(numQueries - begin, kBatchSize);
+        vector<float> queryCopy(
+            queries.data().begin() + begin * dimensionality_,
+            queries.data().begin() + (begin + curSize) * dimensionality_);
+        DenseDataset<float> curQueryDataset(std::move(queryCopy), curSize);
+        return SearchBatched(curQueryDataset, res.subspan(begin, curSize),
+                             final_nn, pre_reorder_nn, leaves);
+      });
+}
+```
 
 ## Setup env
 
-# Install conda: https://www.anaconda.com/download/success
-
 ```
+# Install conda: https://www.anaconda.com/download/success
 conda create -n py38 python=3.8 -y
 conda activate py38                                                                                                              
 pip install scann
 ```
+
+# Evaluation results
+
+```
+python microbench.py
+```
+
+Config:
+
+```
+nvec = int(1e7) # 10M -> so we can evaluate dataset larger than cache size
+dim = 768 # sbert
+nq = 10000
+
+# Scann params
+ah=8
+bytes_per_vec = dim / ah # regarless of lut16 or lut256, each PQ code is stored in 1 byte -> check saved index for this
+reorder_num = 1
+leaf_size = int(4e3)
+perc_to_search = 0.1 # single-thread
+
+search_mt_batch_size_list = [24, 96, 1000, 10000] # cpu_count # 128
+perc_to_search_list = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1]
+```
+
+Example log:
+
+```
+Index exists, loading...
+dataset:  10000000 768
+queries:  (10000, 768)
+leaf_size: 4000	num_leaves: 2500
+perc_to_search: 0.01	num_leaves_to_search: 25
+ah: 8, bytes_per_vec: 96.0
+
+Single thread search starts (searching all leaves)
+perc_to_search: 0.001	num_leaves_to_search: 2
+Sinlge-thread Time: 1.6336536407470703
+	 compute throughput: 3.09 GB/s 	memory throughput 4.70 GB/s
+perc_to_search: 0.005	num_leaves_to_search: 12
+Sinlge-thread Time: 2.6820828914642334
+	 compute throughput: 9.04 GB/s 	memory throughput 17.18 GB/s
+perc_to_search: 0.01	num_leaves_to_search: 25
+Sinlge-thread Time: 4.045190811157227
+	 compute throughput: 12.16 GB/s 	memory throughput 23.73 GB/s
+perc_to_search: 0.05	num_leaves_to_search: 125
+Sinlge-thread Time: 14.414651155471802
+	 compute throughput: 16.73 GB/s 	memory throughput 33.30 GB/s
+perc_to_search: 0.1	num_leaves_to_search: 250
+Sinlge-thread Time: 27.062594175338745
+	 compute throughput: 17.78 GB/s 	memory throughput 35.47 GB/s
+
+Multi-thread search starts (searching all leaves)
+=== Thread batch size: 24 ===
+
+perc_to_search: 0.001	num_leaves_to_search: 2
+Multi-thread Time: 0.2037208080291748
+	 compute throughput: 24.74 GB/s 	memory throughput 37.70 GB/s
+perc_to_search: 0.002	num_leaves_to_search: 5
+Multi-thread Time: 0.2862727642059326
+	 compute throughput: 37.73 GB/s 	memory throughput 67.07 GB/s
+perc_to_search: 0.005	num_leaves_to_search: 12
+Multi-thread Time: 0.5083720684051514
+	 compute throughput: 47.68 GB/s 	memory throughput 90.64 GB/s
+perc_to_search: 0.01	num_leaves_to_search: 25
+Multi-thread Time: 0.9016368389129639
+	 compute throughput: 54.57 GB/s 	memory throughput 106.47 GB/s
+perc_to_search: 0.02	num_leaves_to_search: 50
+Multi-thread Time: 1.7631402015686035
+	 compute throughput: 55.13 GB/s 	memory throughput 108.90 GB/s
+perc_to_search: 0.05	num_leaves_to_search: 125
+Multi-thread Time: 4.187558650970459
+	 compute throughput: 57.60 GB/s 	memory throughput 114.63 GB/s
+perc_to_search: 0.1	num_leaves_to_search: 250
+Multi-thread Time: 7.700155735015869
+	 compute throughput: 62.49 GB/s 	memory throughput 124.67 GB/s
+=== Thread batch size: 96 ===
+
+perc_to_search: 0.001	num_leaves_to_search: 2
+Multi-thread Time: 0.12847042083740234
+	 compute throughput: 39.23 GB/s 	memory throughput 59.78 GB/s
+perc_to_search: 0.002	num_leaves_to_search: 5
+Multi-thread Time: 0.21007728576660156
+	 compute throughput: 51.41 GB/s 	memory throughput 91.39 GB/s
+perc_to_search: 0.005	num_leaves_to_search: 12
+Multi-thread Time: 0.4222753047943115
+	 compute throughput: 57.40 GB/s 	memory throughput 109.12 GB/s
+perc_to_search: 0.01	num_leaves_to_search: 25
+Multi-thread Time: 0.852508544921875
+	 compute throughput: 57.71 GB/s 	memory throughput 112.61 GB/s
+perc_to_search: 0.02	num_leaves_to_search: 50
+Multi-thread Time: 1.6127843856811523
+	 compute throughput: 60.27 GB/s 	memory throughput 119.05 GB/s
+perc_to_search: 0.05	num_leaves_to_search: 125
+Multi-thread Time: 3.7828140258789062
+	 compute throughput: 63.76 GB/s 	memory throughput 126.89 GB/s
+perc_to_search: 0.1	num_leaves_to_search: 250
+Multi-thread Time: 7.2210187911987305
+	 compute throughput: 66.64 GB/s 	memory throughput 132.95 GB/s
+=== Thread batch size: 1000 ===
+
+perc_to_search: 0.001	num_leaves_to_search: 2
+Multi-thread Time: 0.10451650619506836
+	 compute throughput: 48.22 GB/s 	memory throughput 73.48 GB/s
+perc_to_search: 0.002	num_leaves_to_search: 5
+Multi-thread Time: 0.1939997673034668
+	 compute throughput: 55.67 GB/s 	memory throughput 98.97 GB/s
+perc_to_search: 0.005	num_leaves_to_search: 12
+Multi-thread Time: 0.3942122459411621
+	 compute throughput: 61.49 GB/s 	memory throughput 116.89 GB/s
+perc_to_search: 0.01	num_leaves_to_search: 25
+Multi-thread Time: 0.7705230712890625
+	 compute throughput: 63.85 GB/s 	memory throughput 124.59 GB/s
+perc_to_search: 0.02	num_leaves_to_search: 50
+Multi-thread Time: 1.4979090690612793
+	 compute throughput: 64.89 GB/s 	memory throughput 128.18 GB/s
+perc_to_search: 0.05	num_leaves_to_search: 125
+Multi-thread Time: 0.687361478805542
+	 compute throughput: 350.91 GB/s 	memory throughput 698.32 GB/s
+perc_to_search: 0.1	num_leaves_to_search: 250
+Multi-thread Time: 1.0480096340179443
+	 compute throughput: 459.16 GB/s 	memory throughput 916.02 GB/s
+=== Thread batch size: 10000 ===
+
+perc_to_search: 0.001	num_leaves_to_search: 2
+Multi-thread Time: 0.15301275253295898
+	 compute throughput: 32.94 GB/s 	memory throughput 50.19 GB/s
+perc_to_search: 0.002	num_leaves_to_search: 5
+Multi-thread Time: 0.24365901947021484
+	 compute throughput: 44.32 GB/s 	memory throughput 78.80 GB/s
+perc_to_search: 0.005	num_leaves_to_search: 12
+Multi-thread Time: 0.15006494522094727
+	 compute throughput: 161.53 GB/s 	memory throughput 307.07 GB/s
+perc_to_search: 0.01	num_leaves_to_search: 25
+Multi-thread Time: 0.1579434871673584
+	 compute throughput: 311.50 GB/s 	memory throughput 607.81 GB/s
+perc_to_search: 0.02	num_leaves_to_search: 50
+Multi-thread Time: 0.20764946937561035
+	 compute throughput: 468.10 GB/s 	memory throughput 924.64 GB/s
+perc_to_search: 0.05	num_leaves_to_search: 125
+Multi-thread Time: 0.3974933624267578
+	 compute throughput: 606.80 GB/s 	memory throughput 1207.57 GB/s
+perc_to_search: 0.1	num_leaves_to_search: 250
+Multi-thread Time: 0.7120893001556396
+	 compute throughput: 675.76 GB/s 	memory throughput 1348.15 GB/s
+```
+
+Analysis of results:
+* Hardware
+  * m6a.12xlarge
+  * 24 cores ( AMD EPYC 7R13 @2650MHz)
+  * 153.6 GB/s
+* Batching:
+  * Seems when scan ratio is high, another config is used -> e.g., 0.05  is faster than 0.02 -> so something must be batched, turning the problem into compute bound
+    * there's a drop from memory throughput ~120 GB -> 600~1300GB/s
+    * e.g., see thread batch size of 10000
+  * So we only target the case without data reuse
+* Memory and storage:
+  * It seems ScaNN use 1 byte to store 1 lut16, instead of using 4-bit
+  * So for compute, I normalize the performance to the one with 4-bit storage format 
+  * For memory, I assume root is always in cache, only counting the bytes for leaves; also, here 1 byte to store 1 lut16
+* End-to-end results:
+  * CPU throughput
+    * up to 17.8 GB/s per core
+  * Bandwidth (when reaching the limit of the non-reuse batching policy, last result in each thread number)
+    * 124.67 ~ 132.95 GB/s 
+    * 81.1 ~ 86.5 GB/s
+
